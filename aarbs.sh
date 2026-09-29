@@ -1,5 +1,7 @@
 #!/bin/sh
 
+# shellcheck disable=SC2024 # Root opens $logfile; sudo'd commands inherit the fd.
+
 # Abs' Auto Rice Bootstrapping Script
 #
 # Copied and modified from:
@@ -12,53 +14,58 @@
 progsurl="https://raw.githubusercontent.com/askeko/aarbs/main/progs.csv"
 progsfile="$(dirname "$0")/progs.csv"
 [ -f "$0" ] || progsfile=""
+dotfilesrepo="https://github.com/askeko/absrice.git"
 aurhelper="yay"
-repobranch="main"
+logfile="/var/log/aarbs.log"
 
 ### FUNCTIONS ###
 
-installpkg() {
-    pacman --noconfirm --needed -S "$1" >/dev/null 2>&1
-}
-
 error() {
-    # Log to stderr and exit with failure.
+    # Clears any whiptail screen, logs to stderr and exits with failure.
+    clear
     printf "%s\n" "$1" >&2
     exit 1
 }
 
 welcomemsg() {
+    # Welcomes the user to this awesome automatic minimal Arch linux desktop install script.
     whiptail --title "Welcome!" \
-        --msgbox "Welcome to Abs's Auto-Rice Bootstrapping Script!\\n\\nThis script will automatically install a fully-featured Linux desktop, which I use as my main machine.\\n\\n-Abs" 10 60
+        --msgbox "Welcome to Abs's Auto-Rice Bootstrapping Script!\\n\\nThis script will automatically install a minimal Linux desktop, which I use as my main machine.\\n\\n-Abs" 10 60
+}
 
-    whiptail --title "Important Note!" --yes-button "All ready!" \
-        --no-button "Return..." \
-        --yesno "Be sure the computer you are using has current pacman updates and refreshed Arch keyrings.\\n\\nIf it does not, the installation of some programs might fail." 8 70
+validname() {
+    # Succeeds if $1 is a valid, non-root username of at most 32 characters.
+    [ "$1" != "root" ] && [ "${#1}" -le 32 ] || return 1
+    case "$1" in
+        "" | [!a-z]* | *[!a-z0-9_-]*) return 1 ;;
+    esac
 }
 
 getuserandpass() {
-    # Prompts user for new username an password.
-    name=$(whiptail --inputbox "First, please enter a name for the user account." 10 60 3>&1 1>&2 2>&3 3>&1) || exit 1
-    while ! echo "$name" | grep -q "^[a-z_][a-z0-9_-]*$"; do
-        name=$(whiptail --nocancel --inputbox "Username not valid. Give a username beginning with a letter, with only lowercase letters, - or _." 10 60 3>&1 1>&2 2>&3 3>&1)
+    # Prompts user for new username and password.
+    name=$(whiptail --inputbox "First, please enter a name for the user account." 10 60 3>&1 1>&2 2>&3 3>&-) || exit 1
+    while ! validname "$name"; do
+        name=$(whiptail --nocancel --inputbox "Username not valid. Give a username beginning with a letter, with only lowercase letters, digits, - or _ (max 32 characters, not root)." 10 60 3>&1 1>&2 2>&3 3>&-)
     done
-    pass1=$(whiptail --nocancel --passwordbox "Enter a password for that user." 10 60 3>&1 1>&2 2>&3 3>&1)
-    pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
-    while ! [ "$pass1" = "$pass2" ]; do
+    pass1=$(whiptail --nocancel --passwordbox "Enter a password for that user." 10 60 3>&1 1>&2 2>&3 3>&-)
+    pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&-)
+    while [ -z "$pass1" ] || [ "$pass1" != "$pass2" ]; do
         unset pass2
-        pass1=$(whiptail --nocancel --passwordbox "Passwords do not match.\\n\\nEnter password again." 10 60 3>&1 1>&2 2>&3 3>&1)
-        pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
+        pass1=$(whiptail --nocancel --passwordbox "Passwords are empty or do not match.\\n\\nEnter password again." 10 60 3>&1 1>&2 2>&3 3>&-)
+        pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&-)
     done
 }
 
 usercheck() {
+    # Warns the user before installing for an existing user.
     ! { id -u "$name" >/dev/null 2>&1; } ||
         whiptail --title "WARNING" --yes-button "CONTINUE" \
             --no-button "No wait..." \
-            --yesno "The user \`$name\` already exists on this system. AARBS can install for a user already existing, but it will OVERWRITE any conflicting settings/dotfiles on the user account.\\n\\nAARBS will NOT overwrite your user files, documents, videos, etc., so don't worry about that, but only click <CONTINUE> if you don't mind your settings being overwritten.\\n\\nNote also that AARBS will change $name's password to the one you just gave." 14 70
+            --yesno "The user \`$name\` already exists on this system. AARBS can install for an existing user, but it will OVERWRITE any conflicting dotfiles with the ones from $dotfilesrepo.\\n\\nAARBS will NOT touch your documents, videos, etc. It will also add $name to the wheel group, set their shell to zsh and change their password to the one you just gave." 12 70
 }
 
 preinstallmsg() {
+    # Prompts the user for acknowledgement of starting the script.
     whiptail --title "Let's get this party started!" --yes-button "Let's go!" \
         --no-button "No, nevermind!" \
         --yesno "The rest of the installation will now be totally automated, so you can sit back and relax.\\n\\nIt will take some time, but when done, you can relax even more with your complete system.\\n\\nNow just press <Let's go!> and the system will begin installation!" 13 60 || {
@@ -68,89 +75,46 @@ preinstallmsg() {
 }
 
 adduserandpass() {
-    # Adds user `$name` with password $pass1.
+    # Creates user $name (or updates an existing one) and sets password $pass1.
     whiptail --infobox "Adding user \"$name\"..." 7 50
-    useradd -m -g wheel -s /bin/zsh "$name" >/dev/null 2>&1 ||
-        usermod -a -G wheel "$name" && mkdir -p /home/"$name" && chown "$name":wheel /home/"$name"
-    export repodir="/home/$name/.local/src"
+    if id -u "$name" >/dev/null 2>&1; then
+        usermod -a -G wheel -s /bin/zsh "$name" >>"$logfile" 2>&1 || return 1
+    else
+        useradd -m -G wheel -s /bin/zsh "$name" >>"$logfile" 2>&1 || return 1
+    fi
+    repodir="/home/$name/.local/src"
     mkdir -p "$repodir"
-    chown -R "$name":wheel "$(dirname "$repodir")"
-    echo "$name:$pass1" | chpasswd
+    chown -R "$name": "/home/$name/.local"
+    printf '%s:%s\n' "$name" "$pass1" | chpasswd || return 1
     unset pass1 pass2
 }
 
-refreshkeys() {
-    whiptail --infobox "Refreshing Arch Keyring..." 7 40
-    pacman --noconfirm -S archlinux-keyring >/dev/null 2>&1
+upgradesystem() {
+    # Refreshes Arch keyring and upgrades the system.
+    whiptail --infobox "Refreshing Arch Keyring and upgrading the system..." 7 60
+    pacman --noconfirm -Sy archlinux-keyring >>"$logfile" 2>&1 &&
+        pacman --noconfirm -Su >>"$logfile" 2>&1
 }
 
 manualinstall() {
-    # Installs $1 manually. Used only for AUR helper here.
-    # Should be run after repodir is created and var is set.
-    pacman -Qq "$1" && return 0
+    # Builds and installs AUR package $1 without an AUR helper.
+    # Needs $repodir and the temporary passwordless sudo rule.
+    # Only used to install the AUR helper.
+    pacman -Qq "$1" >/dev/null 2>&1 && return 0
     whiptail --infobox "Installing \"$1\" manually." 7 50
-    sudo -u "$name" mkdir -p "$repodir/$1"
-    sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
-        --no-tags -q "https://aur.archlinux.org/$1.git" "$repodir/$1" ||
-        {
-            cd "$repodir/$1" || return 1
-            sudo -u "$name" git pull --force origin master
-        }
-    cd "$repodir/$1" || exit 1
-    sudo -u "$name" \
-        makepkg --noconfirm -si >/dev/null 2>&1 || return 1
-}
-
-#hyprlandinstall() {
-# Installs hyprland. Should be after yay is installed.
-#	whiptail --infobox "Installing hyprland..." 7 50
-#	sudo -u "$name" $aurhelper -S --noconfirm "gdb ninja gcc cmake meson libxcb xcb-proto xcb-util xcb-util-keysyms libxfixes libx11 libxcomposite xorg-xinput libxrender pixman wayland-protocols cairo pango seatd libxkbcommon xcb-util-wm xorg-xwayland libinput libliftoff libdisplay-info cpio tomlplusplus hyprlang hyprcursor hyprwayland-scanner xcb-util-errors hyprutils" >/dev/null 2>&1
-#	cd "$repodir" || exit 1
-#	git clone --recursive https://github.com/hyprwm/Hyprland
-#	cd Hyprland
-#	make all >/dev/null 2>&1
-#	sudo -u "$name" make install
-#}
-
-maininstall() {
-    # Installs all needed programs from main repo.
-    whiptail --title "AARBS Installation" --infobox "Installing \`$1\` ($n of $total). $1 $2" 9 70
-    installpkg "$1"
-}
-
-gitmakeinstall() {
-    progname="${1##*/}"
-    progname="${progname%.git}"
-    dir="$repodir/$progname"
-    whiptail --title "AARBS Installation" \
-        --infobox "Installing \`$progname\` ($n of $total) via \`git\` and \`make\`. $(basename "$1") $2" 8 70
-    sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
-        --no-tags -q "$1" "$dir" ||
-        {
-            cd "$dir" || return 1
-            sudo -u "$name" git pull --force origin master
-        }
-    cd "$dir" || exit 1
-    make >/dev/null 2>&1
-    make install >/dev/null 2>&1
-    cd /tmp || return 1
-}
-
-aurinstall() {
-    whiptail --title "AARBS Installation" \
-        --infobox "Installing \`$1\` ($n of $total) from the AUR. $1 $2" 9 70
-    echo "$aurinstalled" | grep -q "^$1$" && return 1
-    sudo -u "$name" $aurhelper -S --noconfirm "$1" >/dev/null 2>&1
-}
-
-pipinstall() {
-    whiptail --title "AARBS Installation" \
-        --infobox "Installing the Python package \`$1\` ($n of $total). $1 $2" 9 70
-    [ -x "$(command -v "pip")" ] || installpkg python-pip >/dev/null 2>&1
-    yes | pip install "$1"
+    dir="$repodir/$1"
+    if [ -d "$dir/.git" ]; then
+        sudo -u "$name" git -C "$dir" pull --ff-only -q
+    else
+        sudo -u "$name" git clone --depth 1 --single-branch --no-tags -q \
+            "https://aur.archlinux.org/$1.git" "$dir"
+    fi || return 1
+    sudo -u "$name" -D "$dir" makepkg --noconfirm -si >>"$logfile" 2>&1
 }
 
 installationloop() {
+    # Installs everything in progs.csv: repo packages in one pacman call and AUR
+    # packages in one yay call. Stops and names any package that doesn't exist.
     progs=$(mktemp) || error "Failed to create temp file."
     if [ -f "$progsfile" ]; then
         cp "$progsfile" "$progs"
@@ -158,38 +122,82 @@ installationloop() {
         curl -fsSL "$progsurl" -o "$progs" ||
             error "Failed to download $progsurl."
     fi
-    # Drop comments and blank lines for correct application count
+    # Drop comments and blank lines.
     sed -i '/^#/d;/^[[:space:]]*$/d' "$progs"
-    total=$(wc -l <"$progs")
-    aurinstalled=$(pacman -Qqm)
-    while IFS=, read -r tag program comment; do
-        n=$((n + 1))
-        echo "$comment" | grep -q "^\".*\"$" &&
-            comment="$(echo "$comment" | sed -E "s/(^\"|\"$)//g")"
+    repopkgs="" aurpkgs="" nrepo=0 naur=0
+    while IFS=, read -r tag program _; do
         case "$tag" in
-            "A") aurinstall "$program" "$comment" ;;
-            "G") gitmakeinstall "$program" "$comment" ;;
-            "P") pipinstall "$program" "$comment" ;;
-            *) maininstall "$program" "$comment" ;;
+            "A") aurpkgs="$aurpkgs $program" naur=$((naur + 1)) ;;
+            *) repopkgs="$repopkgs $program" nrepo=$((nrepo + 1)) ;;
         esac
     done <"$progs"
     rm -f "$progs"
+
+    # shellcheck disable=SC2086 # The package lists are meant to be split.
+    {
+        # Check every name first, so a renamed or removed package is reported
+        # by name instead of failing the whole batch.
+        whiptail --title "AARBS Installation" \
+            --infobox "Checking $((nrepo + naur)) packages..." 8 70
+        missing=""
+        for p in $repopkgs; do
+            pacman -Si "$p" >/dev/null 2>&1 || missing="$missing $p"
+        done
+        for p in $aurpkgs; do
+            sudo -u "$name" $aurhelper -Si "$p" >/dev/null 2>&1 || missing="$missing $p"
+        done
+        [ -z "$missing" ] ||
+            error "Packages not found:$missing. Remove or rename them in progs.csv, then re-run the script."
+
+        whiptail --title "AARBS Installation" \
+            --infobox "Installing $nrepo packages from the official repos..." 8 70
+        pacman --noconfirm --needed -S $repopkgs >>"$logfile" 2>&1 ||
+            error "Installing official packages failed. See $logfile for the cause."
+
+        [ -n "$aurpkgs" ] || return 0
+        whiptail --title "AARBS Installation" \
+            --infobox "Installing $naur packages from the AUR..." 8 70
+        sudo -u "$name" $aurhelper -S --needed --noconfirm $aurpkgs >>"$logfile" 2>&1 ||
+            error "Installing AUR packages failed. See $logfile for the cause."
+    }
+}
+
+installdotfiles() {
+    # Clones and applies the user's dotfiles with chezmoi.
+    whiptail --infobox "Installing dotfiles with chezmoi..." 7 60
+    sudo -H -u "$name" chezmoi init --apply --force "$dotfilesrepo" >>"$logfile" 2>&1 ||
+        return 1
+    # Rebuild bat's cache so custom themes from the dotfiles are picked up.
+    sudo -H -u "$name" bat cache --build >>"$logfile" 2>&1
+}
+
+installsudoers() {
+    # Validates sudoers rule $2 and installs it as /etc/sudoers.d/$1.
+    tmp=$(mktemp) || return 1
+    printf '%s\n' "$2" >"$tmp"
+    visudo -cqf "$tmp" &&
+        install -m 0440 -o root -g root "$tmp" "/etc/sudoers.d/$1"
+    ret=$?
+    rm -f "$tmp"
+    return "$ret"
 }
 
 finalize() {
+    # Tells the user how to do the next steps.
     whiptail --title "All done!" \
-        --msgbox "Congrats! Provided there were no hidden errors, the script completed successfully and all the programs and configuration files should be in place.\\n\\nTo run the new graphical environment, log out and log back in as your new user, then run the command \"startx\" to start the graphical environment (it will start automatically in tty1).\\n\\n.t Abs" 13 80
+        --msgbox "Installation complete! All programs and dotfiles should be in place.\\n\\nLog out and back in as $name on tty1 to start the graphical environment.\\n\\n-Abs" 11 80
 }
 
 ### THE ACTUAL SCRIPT ###
 
 ### This is how everything happens in an intuitive format and order.
 
-# Check if user is root on Arch distro. Install whiptail.
-pacman --noconfirm --needed -Sy libnewt ||
-    error "Are you sure you're running this as the root user, are on an Arch-based distribution and have an internet connection?"
+# Check that we're root, then install whiptail.
+[ "$(id -u)" -eq 0 ] || error "This script must be run as root."
+pacman --noconfirm --needed -S libnewt ||
+    error "Failed to install whiptail (libnewt). Are you on Arch with an internet connection?"
 
-# Welcome user and pick dotfiles.
+# Welcome user.
 welcomemsg || error "User exited."
 
 # Get and verify username and password.
@@ -203,67 +211,63 @@ preinstallmsg || error "User exited."
 
 ### The rest of the script requires no user input.
 
-# Refresh Arch keyrings.
-refreshkeys ||
-    error "Error automatically refreshing Arch keyring. Consider doing so manually."
+# Make sure the clock is synced before downloading and verifying packages.
+timedatectl set-ntp true >>"$logfile" 2>&1
 
-for x in curl ca-certificates base-devel git ntp zsh; do
-    whiptail --title "AARBS Installation" \
-        --infobox "Installing \`$x\` which is required to install and configure other programs." 8 70
-    installpkg "$x"
-done
+# Refresh Arch keyring and update the system.
+upgradesystem ||
+    error "Error upgrading the system. Consider running pacman -Syu manually. See $logfile"
 
 whiptail --title "AARBS Installation" \
-    --infobox "Synchronizing system time to ensure successful and secure installation of software..." 8 70
-ntpd -q -g >/dev/null 2>&1
+    --infobox "Installing packages required to install and configure other programs..." 8 70
+pacman --noconfirm --needed -S curl ca-certificates base-devel git zsh >>"$logfile" 2>&1 ||
+    error "Failed to install base packages. See $logfile"
 
 adduserandpass || error "Error adding username and/or password."
-
-[ -f /etc/sudoers.pacnew ] && cp /etc/sudoers.pacnew /etc/sudoers # Just in case
 
 # Allow user to run sudo without password. Since AUR programs must be installed
 # in a fakeroot environment, this is required for all builds with AUR.
 trap 'rm -f /etc/sudoers.d/aarbs-temp' HUP INT QUIT TERM PWR EXIT
-echo "%wheel ALL=(ALL) NOPASSWD: ALL
-Defaults:%wheel,root runcwd=*" >/etc/sudoers.d/aarbs-temp
+installsudoers aarbs-temp "%wheel ALL=(ALL) NOPASSWD: ALL
+Defaults:%wheel,root runcwd=*" ||
+    error "Failed to install temporary sudoers rule."
 
 # Make pacman colorful, concurrent downloads and Pacman eye-candy.
 grep -q "ILoveCandy" /etc/pacman.conf || sed -i "/#VerbosePkgLists/a ILoveCandy" /etc/pacman.conf
 sed -Ei "s/^#(ParallelDownloads).*/\1 = 10/;/^#Color$/s/#//" /etc/pacman.conf
 
 # Use all cores for compilation.
-sed -i "s/-j2/-j$(nproc)/;/^#MAKEFLAGS/s/^#//" /etc/makepkg.conf
+mkdir -p /etc/makepkg.conf.d
+printf 'MAKEFLAGS="-j%s"\n' "$(nproc)" >/etc/makepkg.conf.d/aarbs.conf
 
-manualinstall yay || error "Failed to install AUR helper."
-
-#hyprlandinstall
+manualinstall yay-bin || error "Failed to install AUR helper. See $logfile"
 
 # The command that does all the installing. Reads the progs.csv file and
 # installs each needed program the way required. Be sure to run this only after
-# the user has been created and has priviledges to run sudo without a password
+# the user has been created and has privileges to run sudo without a password
 # and all build dependencies are installed.
 installationloop
 
+# Revoke passwordless sudo as it is no longer needed.
+rm -f /etc/sudoers.d/aarbs-temp
+
+installdotfiles || error "Failed to install dotfiles. See $logfile"
+
 # Most important command! Get rid of the beep!
-rmmod pcspkr
+rmmod pcspkr 2>/dev/null
 echo "blacklist pcspkr" >/etc/modprobe.d/nobeep.conf
 
-# Make zsh the default shell for the user.
-chsh -s /bin/zsh "$name" >/dev/null 2>&1
+# Create zsh's cache directory for the user
 sudo -u "$name" mkdir -p "/home/$name/.cache/zsh/"
 
-# Make rofi act as a dmenu replacement
-sudo ln -s /usr/bin/rofi /usr/bin/dmenu
-
-# Allow wheel users to sudo with password and allow several system commands
-# (like `shutdown` to run without password).
-echo "%wheel ALL=(ALL:ALL) ALL" >/etc/sudoers.d/00-aarbs-wheel-can-sudo
-echo "%wheel ALL=(ALL:ALL) NOPASSWD: /usr/bin/shutdown,/usr/bin/reboot,/usr/bin/systemctl suspend,/usr/bin/wifi-menu,/usr/bin/mount,/usr/bin/umount,/usr/bin/xbacklight,/usr/bin/pacman -Syu,/usr/bin/pacman -Syyu,/usr/bin/pacman -Syyu --noconfirm,/usr/bin/loadkeys,/usr/bin/pacman -Syyuw --noconfirm,/usr/bin/pacman -S -y --config /etc/pacman.conf --,/usr/bin/pacman -S -y -u --config /etc/pacman.conf --" >/etc/sudoers.d/01-aarbs-cmds-without-password
-echo "Defaults editor=/usr/bin/nvim" >/etc/sudoers.d/02-aarbs-visudo-editor
-mkdir -p /etc/sysctl.d
-echo "kernel.dmesg_restrict = 0" >/etc/sysctl.d/dmesg.conf
-
-rm -f /etc/sudoers.d/larbs-temp
+# Allow wheel users to sudo with password, and to upgrade the system without one.
+installsudoers 00-aarbs-wheel-can-sudo "%wheel ALL=(ALL:ALL) ALL" ||
+    error "Failed to install sudoers rule for wheel."
+installsudoers 01-aarbs-cmds-without-password \
+    "%wheel ALL=(ALL:ALL) NOPASSWD: /usr/bin/pacman -Syu,/usr/bin/pacman -Syu --noconfirm" ||
+    error "Failed to install passwordless sudoers rule."
+installsudoers 02-aarbs-visudo-editor "Defaults editor=/usr/bin/nvim" ||
+    error "Failed to install sudoers editor rule."
 
 # Last message! Install complete!
 finalize
