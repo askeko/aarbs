@@ -1,104 +1,108 @@
 #!/bin/sh
 
+# Abs' Auto Rice Bootstrapping Script
+#
+# Copied and modified from:
 # Luke's Auto Rice Boostrapping Script (LARBS)
 # by Luke Smith <luke@lukesmith.xyz>
 # License: GNU GPLv3
-# Modified by Abs
 
 ### OPTIONS AND VARIABLES ###
 
-progsfile="https://raw.githubusercontent.com/askeko/AARBS-wayland/master/progs.csv"
+progsurl="https://raw.githubusercontent.com/askeko/aarbs/main/progs.csv"
+progsfile="$(dirname "$0")/progs.csv"
+[ -f "$0" ] || progsfile=""
 aurhelper="yay"
-repobranch="master"
+repobranch="main"
 
 ### FUNCTIONS ###
 
 installpkg() {
-	pacman --noconfirm --needed -S "$1" >/dev/null 2>&1
+    pacman --noconfirm --needed -S "$1" >/dev/null 2>&1
 }
 
 error() {
-	# Log to stderr and exit with failure.
-	printf "%s\n" "$1" >&2
-	exit 1
+    # Log to stderr and exit with failure.
+    printf "%s\n" "$1" >&2
+    exit 1
 }
 
 welcomemsg() {
-	whiptail --title "Welcome!" \
-		--msgbox "Welcome to Abs's Auto-Rice Bootstrapping Script!\\n\\nThis script will automatically install a fully-featured Linux desktop, which I use as my main machine.\\n\\n-Abs" 10 60
+    whiptail --title "Welcome!" \
+        --msgbox "Welcome to Abs's Auto-Rice Bootstrapping Script!\\n\\nThis script will automatically install a fully-featured Linux desktop, which I use as my main machine.\\n\\n-Abs" 10 60
 
-	whiptail --title "Important Note!" --yes-button "All ready!" \
-		--no-button "Return..." \
-		--yesno "Be sure the computer you are using has current pacman updates and refreshed Arch keyrings.\\n\\nIf it does not, the installation of some programs might fail." 8 70
+    whiptail --title "Important Note!" --yes-button "All ready!" \
+        --no-button "Return..." \
+        --yesno "Be sure the computer you are using has current pacman updates and refreshed Arch keyrings.\\n\\nIf it does not, the installation of some programs might fail." 8 70
 }
 
 getuserandpass() {
-	# Prompts user for new username an password.
-	name=$(whiptail --inputbox "First, please enter a name for the user account." 10 60 3>&1 1>&2 2>&3 3>&1) || exit 1
-	while ! echo "$name" | grep -q "^[a-z_][a-z0-9_-]*$"; do
-		name=$(whiptail --nocancel --inputbox "Username not valid. Give a username beginning with a letter, with only lowercase letters, - or _." 10 60 3>&1 1>&2 2>&3 3>&1)
-	done
-	pass1=$(whiptail --nocancel --passwordbox "Enter a password for that user." 10 60 3>&1 1>&2 2>&3 3>&1)
-	pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
-	while ! [ "$pass1" = "$pass2" ]; do
-		unset pass2
-		pass1=$(whiptail --nocancel --passwordbox "Passwords do not match.\\n\\nEnter password again." 10 60 3>&1 1>&2 2>&3 3>&1)
-		pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
-	done
+    # Prompts user for new username an password.
+    name=$(whiptail --inputbox "First, please enter a name for the user account." 10 60 3>&1 1>&2 2>&3 3>&1) || exit 1
+    while ! echo "$name" | grep -q "^[a-z_][a-z0-9_-]*$"; do
+        name=$(whiptail --nocancel --inputbox "Username not valid. Give a username beginning with a letter, with only lowercase letters, - or _." 10 60 3>&1 1>&2 2>&3 3>&1)
+    done
+    pass1=$(whiptail --nocancel --passwordbox "Enter a password for that user." 10 60 3>&1 1>&2 2>&3 3>&1)
+    pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
+    while ! [ "$pass1" = "$pass2" ]; do
+        unset pass2
+        pass1=$(whiptail --nocancel --passwordbox "Passwords do not match.\\n\\nEnter password again." 10 60 3>&1 1>&2 2>&3 3>&1)
+        pass2=$(whiptail --nocancel --passwordbox "Retype password." 10 60 3>&1 1>&2 2>&3 3>&1)
+    done
 }
 
 usercheck() {
-	! { id -u "$name" >/dev/null 2>&1; } ||
-		whiptail --title "WARNING" --yes-button "CONTINUE" \
-			--no-button "No wait..." \
-			--yesno "The user \`$name\` already exists on this system. AARBS can install for a user already existing, but it will OVERWRITE any conflicting settings/dotfiles on the user account.\\n\\nAARBS will NOT overwrite your user files, documents, videos, etc., so don't worry about that, but only click <CONTINUE> if you don't mind your settings being overwritten.\\n\\nNote also that AARBS will change $name's password to the one you just gave." 14 70
+    ! { id -u "$name" >/dev/null 2>&1; } ||
+        whiptail --title "WARNING" --yes-button "CONTINUE" \
+            --no-button "No wait..." \
+            --yesno "The user \`$name\` already exists on this system. AARBS can install for a user already existing, but it will OVERWRITE any conflicting settings/dotfiles on the user account.\\n\\nAARBS will NOT overwrite your user files, documents, videos, etc., so don't worry about that, but only click <CONTINUE> if you don't mind your settings being overwritten.\\n\\nNote also that AARBS will change $name's password to the one you just gave." 14 70
 }
 
 preinstallmsg() {
-	whiptail --title "Let's get this party started!" --yes-button "Let's go!" \
-		--no-button "No, nevermind!" \
-		--yesno "The rest of the installation will now be totally automated, so you can sit back and relax.\\n\\nIt will take some time, but when done, you can relax even more with your complete system.\\n\\nNow just press <Let's go!> and the system will begin installation!" 13 60 || {
-		clear
-		exit 1
-	}
+    whiptail --title "Let's get this party started!" --yes-button "Let's go!" \
+        --no-button "No, nevermind!" \
+        --yesno "The rest of the installation will now be totally automated, so you can sit back and relax.\\n\\nIt will take some time, but when done, you can relax even more with your complete system.\\n\\nNow just press <Let's go!> and the system will begin installation!" 13 60 || {
+        clear
+        exit 1
+    }
 }
 
 adduserandpass() {
-	# Adds user `$name` with password $pass1.
-	whiptail --infobox "Adding user \"$name\"..." 7 50
-	useradd -m -g wheel -s /bin/zsh "$name" >/dev/null 2>&1 ||
-		usermod -a -G wheel "$name" && mkdir -p /home/"$name" && chown "$name":wheel /home/"$name"
-	export repodir="/home/$name/.local/src"
-	mkdir -p "$repodir"
-	chown -R "$name":wheel "$(dirname "$repodir")"
-	echo "$name:$pass1" | chpasswd
-	unset pass1 pass2
+    # Adds user `$name` with password $pass1.
+    whiptail --infobox "Adding user \"$name\"..." 7 50
+    useradd -m -g wheel -s /bin/zsh "$name" >/dev/null 2>&1 ||
+        usermod -a -G wheel "$name" && mkdir -p /home/"$name" && chown "$name":wheel /home/"$name"
+    export repodir="/home/$name/.local/src"
+    mkdir -p "$repodir"
+    chown -R "$name":wheel "$(dirname "$repodir")"
+    echo "$name:$pass1" | chpasswd
+    unset pass1 pass2
 }
 
 refreshkeys() {
-	whiptail --infobox "Refreshing Arch Keyring..." 7 40
-	pacman --noconfirm -S archlinux-keyring >/dev/null 2>&1
+    whiptail --infobox "Refreshing Arch Keyring..." 7 40
+    pacman --noconfirm -S archlinux-keyring >/dev/null 2>&1
 }
 
 manualinstall() {
-	# Installs $1 manually. Used only for AUR helper here.
-	# Should be run after repodir is created and var is set.
-	pacman -Qq "$1" && return 0
-	whiptail --infobox "Installing \"$1\" manually." 7 50
-	sudo -u "$name" mkdir -p "$repodir/$1"
-	sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
-		--no-tags -q "https://aur.archlinux.org/$1.git" "$repodir/$1" ||
-		{
-			cd "$repodir/$1" || return 1
-			sudo -u "$name" git pull --force origin master
-		}
-	cd "$repodir/$1" || exit 1
-	sudo -u "$name" \
-		makepkg --noconfirm -si >/dev/null 2>&1 || return 1
+    # Installs $1 manually. Used only for AUR helper here.
+    # Should be run after repodir is created and var is set.
+    pacman -Qq "$1" && return 0
+    whiptail --infobox "Installing \"$1\" manually." 7 50
+    sudo -u "$name" mkdir -p "$repodir/$1"
+    sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
+        --no-tags -q "https://aur.archlinux.org/$1.git" "$repodir/$1" ||
+        {
+            cd "$repodir/$1" || return 1
+            sudo -u "$name" git pull --force origin master
+        }
+    cd "$repodir/$1" || exit 1
+    sudo -u "$name" \
+        makepkg --noconfirm -si >/dev/null 2>&1 || return 1
 }
 
 #hyprlandinstall() {
-	# Installs hyprland. Should be after yay is installed.
+# Installs hyprland. Should be after yay is installed.
 #	whiptail --infobox "Installing hyprland..." 7 50
 #	sudo -u "$name" $aurhelper -S --noconfirm "gdb ninja gcc cmake meson libxcb xcb-proto xcb-util xcb-util-keysyms libxfixes libx11 libxcomposite xorg-xinput libxrender pixman wayland-protocols cairo pango seatd libxkbcommon xcb-util-wm xorg-xwayland libinput libliftoff libdisplay-info cpio tomlplusplus hyprlang hyprcursor hyprwayland-scanner xcb-util-errors hyprutils" >/dev/null 2>&1
 #	cd "$repodir" || exit 1
@@ -109,64 +113,72 @@ manualinstall() {
 #}
 
 maininstall() {
-	# Installs all needed programs from main repo.
-	whiptail --title "AARBS Installation" --infobox "Installing \`$1\` ($n of $total). $1 $2" 9 70
-	installpkg "$1"
+    # Installs all needed programs from main repo.
+    whiptail --title "AARBS Installation" --infobox "Installing \`$1\` ($n of $total). $1 $2" 9 70
+    installpkg "$1"
 }
 
 gitmakeinstall() {
-	progname="${1##*/}"
-	progname="${progname%.git}"
-	dir="$repodir/$progname"
-	whiptail --title "AARBS Installation" \
-		--infobox "Installing \`$progname\` ($n of $total) via \`git\` and \`make\`. $(basename "$1") $2" 8 70
-	sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
-		--no-tags -q "$1" "$dir" ||
-		{
-			cd "$dir" || return 1
-			sudo -u "$name" git pull --force origin master
-		}
-	cd "$dir" || exit 1
-	make >/dev/null 2>&1
-	make install >/dev/null 2>&1
-	cd /tmp || return 1
+    progname="${1##*/}"
+    progname="${progname%.git}"
+    dir="$repodir/$progname"
+    whiptail --title "AARBS Installation" \
+        --infobox "Installing \`$progname\` ($n of $total) via \`git\` and \`make\`. $(basename "$1") $2" 8 70
+    sudo -u "$name" git -C "$repodir" clone --depth 1 --single-branch \
+        --no-tags -q "$1" "$dir" ||
+        {
+            cd "$dir" || return 1
+            sudo -u "$name" git pull --force origin master
+        }
+    cd "$dir" || exit 1
+    make >/dev/null 2>&1
+    make install >/dev/null 2>&1
+    cd /tmp || return 1
 }
 
 aurinstall() {
-	whiptail --title "AARBS Installation" \
-		--infobox "Installing \`$1\` ($n of $total) from the AUR. $1 $2" 9 70
-	echo "$aurinstalled" | grep -q "^$1$" && return 1
-	sudo -u "$name" $aurhelper -S --noconfirm "$1" >/dev/null 2>&1
+    whiptail --title "AARBS Installation" \
+        --infobox "Installing \`$1\` ($n of $total) from the AUR. $1 $2" 9 70
+    echo "$aurinstalled" | grep -q "^$1$" && return 1
+    sudo -u "$name" $aurhelper -S --noconfirm "$1" >/dev/null 2>&1
 }
 
 pipinstall() {
-	whiptail --title "AARBS Installation" \
-		--infobox "Installing the Python package \`$1\` ($n of $total). $1 $2" 9 70
-	[ -x "$(command -v "pip")" ] || installpkg python-pip >/dev/null 2>&1
-	yes | pip install "$1"
+    whiptail --title "AARBS Installation" \
+        --infobox "Installing the Python package \`$1\` ($n of $total). $1 $2" 9 70
+    [ -x "$(command -v "pip")" ] || installpkg python-pip >/dev/null 2>&1
+    yes | pip install "$1"
 }
 
 installationloop() {
-	([ -f "$progsfile" ] && cp "$progsfile" /tmp/progs.csv) ||
-		curl -Ls "$progsfile" | sed '/^#/d' >/tmp/progs.csv
-	total=$(wc -l </tmp/progs.csv)
-	aurinstalled=$(pacman -Qqm)
-	while IFS=, read -r tag program comment; do
-		n=$((n + 1))
-		echo "$comment" | grep -q "^\".*\"$" &&
-			comment="$(echo "$comment" | sed -E "s/(^\"|\"$)//g")"
-		case "$tag" in
-		"A") aurinstall "$program" "$comment" ;;
-		"G") gitmakeinstall "$program" "$comment" ;;
-		"P") pipinstall "$program" "$comment" ;;
-		*) maininstall "$program" "$comment" ;;
-		esac
-	done </tmp/progs.csv
+    progs=$(mktemp) || error "Failed to create temp file."
+    if [ -f "$progsfile" ]; then
+        cp "$progsfile" "$progs"
+    else
+        curl -fsSL "$progsurl" -o "$progs" ||
+            error "Failed to download $progsurl."
+    fi
+    # Drop comments and blank lines for correct application count
+    sed -i '/^#/d;/^[[:space:]]*$/d' "$progs"
+    total=$(wc -l <"$progs")
+    aurinstalled=$(pacman -Qqm)
+    while IFS=, read -r tag program comment; do
+        n=$((n + 1))
+        echo "$comment" | grep -q "^\".*\"$" &&
+            comment="$(echo "$comment" | sed -E "s/(^\"|\"$)//g")"
+        case "$tag" in
+            "A") aurinstall "$program" "$comment" ;;
+            "G") gitmakeinstall "$program" "$comment" ;;
+            "P") pipinstall "$program" "$comment" ;;
+            *) maininstall "$program" "$comment" ;;
+        esac
+    done <"$progs"
+    rm -f "$progs"
 }
 
 finalize() {
-	whiptail --title "All done!" \
-		--msgbox "Congrats! Provided there were no hidden errors, the script completed successfully and all the programs and configuration files should be in place.\\n\\nTo run the new graphical environment, log out and log back in as your new user, then run the command \"startx\" to start the graphical environment (it will start automatically in tty1).\\n\\n.t Abs" 13 80
+    whiptail --title "All done!" \
+        --msgbox "Congrats! Provided there were no hidden errors, the script completed successfully and all the programs and configuration files should be in place.\\n\\nTo run the new graphical environment, log out and log back in as your new user, then run the command \"startx\" to start the graphical environment (it will start automatically in tty1).\\n\\n.t Abs" 13 80
 }
 
 ### THE ACTUAL SCRIPT ###
@@ -175,7 +187,7 @@ finalize() {
 
 # Check if user is root on Arch distro. Install whiptail.
 pacman --noconfirm --needed -Sy libnewt ||
-	error "Are you sure you're running this as the root user, are on an Arch-based distribution and have an internet connection?"
+    error "Are you sure you're running this as the root user, are on an Arch-based distribution and have an internet connection?"
 
 # Welcome user and pick dotfiles.
 welcomemsg || error "User exited."
@@ -193,16 +205,16 @@ preinstallmsg || error "User exited."
 
 # Refresh Arch keyrings.
 refreshkeys ||
-	error "Error automatically refreshing Arch keyring. Consider doing so manually."
+    error "Error automatically refreshing Arch keyring. Consider doing so manually."
 
 for x in curl ca-certificates base-devel git ntp zsh; do
-	whiptail --title "AARBS Installation" \
-		--infobox "Installing \`$x\` which is required to install and configure other programs." 8 70
-	installpkg "$x"
+    whiptail --title "AARBS Installation" \
+        --infobox "Installing \`$x\` which is required to install and configure other programs." 8 70
+    installpkg "$x"
 done
 
 whiptail --title "AARBS Installation" \
-	--infobox "Synchronizing system time to ensure successful and secure installation of software..." 8 70
+    --infobox "Synchronizing system time to ensure successful and secure installation of software..." 8 70
 ntpd -q -g >/dev/null 2>&1
 
 adduserandpass || error "Error adding username and/or password."
