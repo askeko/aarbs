@@ -163,8 +163,12 @@ installationloop() {
 }
 
 installdotfiles() {
-    # Clones and applies the user's dotfiles with chezmoi.
+    # Clones and applies the user's dotfiles with chezmoi, replacing an earlier
+    # clone of a different repo.
     whiptail --infobox "Installing dotfiles with chezmoi..." 7 60
+    src="/home/$name/.local/share/chezmoi"
+    [ "$(sudo -u "$name" git -C "$src" remote get-url origin 2>/dev/null)" = "$dotfilesrepo" ] ||
+        rm -rf "$src"
     sudo -H -u "$name" chezmoi init --apply --force "$dotfilesrepo" >>"$logfile" 2>&1 ||
         return 1
     # Rebuild bat's cache so custom themes from the dotfiles are picked up.
