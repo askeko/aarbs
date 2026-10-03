@@ -96,6 +96,21 @@ upgradesystem() {
         pacman --noconfirm -Su >>"$logfile" 2>&1
 }
 
+installgpudrivers() {
+    # Installs 64- and 32-bit Vulkan drivers for the GPUs found, so packages
+    # that need a vulkan-driver (Steam) don't get a provider picked for them.
+    gpus=$(lspci -mm | grep -E '"(VGA compatible|3D|Display) controller"')
+    pkgs=""
+    case "$gpus" in *NVIDIA*) pkgs="$pkgs nvidia-open nvidia-utils lib32-nvidia-utils" ;; esac
+    case "$gpus" in *"Advanced Micro Devices"*) pkgs="$pkgs vulkan-radeon lib32-vulkan-radeon" ;; esac
+    case "$gpus" in *Intel*) pkgs="$pkgs vulkan-intel lib32-vulkan-intel" ;; esac
+    # No known GPU (e.g. a VM): use the software renderer.
+    [ -n "$pkgs" ] || pkgs="vulkan-swrast lib32-vulkan-swrast"
+    whiptail --infobox "Installing GPU drivers:$pkgs" 8 70
+    # shellcheck disable=SC2086 # The package list is meant to be split.
+    pacman --noconfirm --needed -S $pkgs >>"$logfile" 2>&1
+}
+
 manualinstall() {
     # Builds and installs AUR package $1 without an AUR helper.
     # Needs $repodir and the temporary passwordless sudo rule.
@@ -163,16 +178,12 @@ installationloop() {
 }
 
 installdotfiles() {
-    # Clones and applies the user's dotfiles with chezmoi, replacing an earlier
-    # clone of a different repo.
+    # Clones and applies the user's dotfiles with chezmoi. A rerun starts from
+    # a fresh clone; chezmoi retries any run_once_ script that failed.
     whiptail --infobox "Installing dotfiles with chezmoi..." 7 60
     src="/home/$name/.local/share/chezmoi"
-    [ "$(sudo -u "$name" git -C "$src" remote get-url origin 2>/dev/null)" = "$dotfilesrepo" ] ||
-        rm -rf "$src"
-    sudo -H -u "$name" chezmoi init --apply --force "$dotfilesrepo" >>"$logfile" 2>&1 ||
-        return 1
-    # Rebuild bat's cache so custom themes from the dotfiles are picked up.
-    sudo -H -u "$name" bat cache --build >>"$logfile" 2>&1
+    rm -rf -- "$src" 2>>"$logfile" || return 1
+    sudo -H -u "$name" chezmoi init --source "$src" --apply --force "$dotfilesrepo" >>"$logfile" 2>&1
 }
 
 installsudoers() {
@@ -186,10 +197,59 @@ installsudoers() {
     return "$ret"
 }
 
+setupgreetd() {
+    # Starts Hyprland through uwsm from a tuigreet login screen on tty1, and
+    # unlocks gnome-keyring with the login password. Takes effect on reboot.
+    # stderr is redirected first so a failing redirect is logged too.
+    cat 2>>"$logfile" >/etc/greetd/config.toml <<'EOF' || return 1
+[terminal]
+vt = 1
+
+[default_session]
+command = "tuigreet --remember --cmd 'uwsm start hyprland-uwsm.desktop'"
+user = "greeter"
+EOF
+    cat 2>>"$logfile" >/etc/pam.d/greetd <<'EOF' || return 1
+#%PAM-1.0
+
+auth       required     pam_securetty.so
+auth       requisite    pam_nologin.so
+auth       include      system-local-login
+auth       optional     pam_gnome_keyring.so
+account    include      system-local-login
+session    include      system-local-login
+session    optional     pam_gnome_keyring.so auto_start
+EOF
+    systemctl enable greetd.service >>"$logfile" 2>&1
+}
+
+setupservices() {
+    # Enables system services for the installed programs and adds $name to
+    # the groups that use them. Everything takes effect on reboot.
+    # wireguard: let vpn-menu list profile names (the profiles themselves stay
+    # 0600, see the guide).
+    chmod 755 /etc/wireguard 2>>"$logfile" || return 1
+    # docker: keep container networks out of common LAN ranges.
+    mkdir -p /etc/docker 2>>"$logfile" || return 1
+    cat 2>>"$logfile" >/etc/docker/daemon.json <<'EOF' || return 1
+{
+  "default-address-pools": [{ "base": "10.200.0.0/16", "size": 24 }]
+}
+EOF
+    # bluetooth: show device battery, reconnect faster, power adapters on.
+    sed -Ei 's/^#?(Experimental|FastConnectable) *=.*/\1 = true/;s/^#?AutoEnable *=.*/AutoEnable = true/' \
+        /etc/bluetooth/main.conf 2>>"$logfile" || return 1
+    # libvirt: start the default NAT network with the daemon (what
+    # `virsh net-autostart default` does, without a running daemon).
+    ln -sf ../default.xml /etc/libvirt/qemu/networks/autostart/default.xml 2>>"$logfile" || return 1
+    systemctl enable docker.socket libvirtd.service bluetooth.service >>"$logfile" 2>&1 &&
+        usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
+}
+
 finalize() {
     # Tells the user how to do the next steps.
     whiptail --title "All done!" \
-        --msgbox "Installation complete! All programs and dotfiles should be in place.\\n\\nLog out and back in as $name on tty1 to start the graphical environment.\\n\\n-Abs" 11 80
+        --msgbox "Installation complete! All programs and dotfiles should be in place.\\n\\nReboot, then log in as $name at the login screen to start Hyprland.\\n\\n-Abs" 11 80
 }
 
 ### THE ACTUAL SCRIPT ###
@@ -218,27 +278,32 @@ preinstallmsg || error "User exited."
 # Make sure the clock is synced before downloading and verifying packages.
 timedatectl set-ntp true >>"$logfile" 2>&1
 
+# Make pacman colorful, concurrent downloads and Pacman eye-candy. Enable
+# multilib for 32-bit libraries (Steam and its GPU drivers).
+grep -q "ILoveCandy" /etc/pacman.conf || sed -i "/#VerbosePkgLists/a ILoveCandy" /etc/pacman.conf
+sed -Ei "s/^#(ParallelDownloads).*/\1 = 10/;/^#Color$/s/#//" /etc/pacman.conf
+sed -i '/^#\[multilib\]$/{s/^#//;n;s/^#//}' /etc/pacman.conf
+
 # Refresh Arch keyring and update the system.
 upgradesystem ||
     error "Error upgrading the system. Consider running pacman -Syu manually. See $logfile"
 
 whiptail --title "AARBS Installation" \
     --infobox "Installing packages required to install and configure other programs..." 8 70
-pacman --noconfirm --needed -S curl ca-certificates base-devel git zsh >>"$logfile" 2>&1 ||
+pacman --noconfirm --needed -S curl ca-certificates base-devel git zsh pciutils >>"$logfile" 2>&1 ||
     error "Failed to install base packages. See $logfile"
+
+installgpudrivers || error "Failed to install GPU drivers. See $logfile"
 
 adduserandpass || error "Error adding username and/or password."
 
 # Allow user to run sudo without password. Since AUR programs must be installed
 # in a fakeroot environment, this is required for all builds with AUR.
-trap 'rm -f /etc/sudoers.d/aarbs-temp' HUP INT QUIT TERM PWR EXIT
+trap 'rm -f /etc/sudoers.d/aarbs-temp' EXIT
+trap 'exit 1' HUP INT QUIT TERM PWR
 installsudoers aarbs-temp "%wheel ALL=(ALL) NOPASSWD: ALL
 Defaults:%wheel,root runcwd=*" ||
     error "Failed to install temporary sudoers rule."
-
-# Make pacman colorful, concurrent downloads and Pacman eye-candy.
-grep -q "ILoveCandy" /etc/pacman.conf || sed -i "/#VerbosePkgLists/a ILoveCandy" /etc/pacman.conf
-sed -Ei "s/^#(ParallelDownloads).*/\1 = 10/;/^#Color$/s/#//" /etc/pacman.conf
 
 # Use all cores for compilation.
 mkdir -p /etc/makepkg.conf.d
@@ -257,6 +322,10 @@ rm -f /etc/sudoers.d/aarbs-temp
 
 installdotfiles || error "Failed to install dotfiles. See $logfile"
 
+setupgreetd || error "Failed to set up the login manager. See $logfile"
+
+setupservices || error "Failed to enable services. See $logfile"
+
 # Most important command! Get rid of the beep!
 rmmod pcspkr 2>/dev/null
 echo "blacklist pcspkr" >/etc/modprobe.d/nobeep.conf
@@ -272,6 +341,9 @@ installsudoers 01-aarbs-cmds-without-password \
     error "Failed to install passwordless sudoers rule."
 installsudoers 02-aarbs-visudo-editor "Defaults editor=/usr/bin/nvim" ||
     error "Failed to install sudoers editor rule."
+installsudoers 03-aarbs-wg-quick \
+    '%wheel ALL=(root) NOPASSWD: /usr/bin/wg-quick ^(up|down) [a-zA-Z0-9_=+.-]{1,15}$' ||
+    error "Failed to install sudoers rule for wg-quick."
 
 # Last message! Install complete!
 finalize
