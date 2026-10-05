@@ -198,12 +198,17 @@ installsudoers() {
 }
 
 setupgreetd() {
-    # Starts Hyprland through uwsm from a tuigreet login screen on tty1, and
-    # unlocks gnome-keyring with the login password. Takes effect on reboot.
-    # stderr is redirected first so a failing redirect is logged too.
-    cat 2>>"$logfile" >/etc/greetd/config.toml <<'EOF' || return 1
+    # Logs $name straight into Hyprland (through uwsm) at boot, since the disk
+    # passphrase/YubiKey already guards it; after a logout, tuigreet on tty1
+    # asks for the password and unlocks gnome-keyring with it. Takes effect
+    # on reboot. stderr is redirected first so a failing redirect is logged too.
+    cat 2>>"$logfile" >/etc/greetd/config.toml <<EOF || return 1
 [terminal]
 vt = 1
+
+[initial_session]
+command = "uwsm start hyprland-uwsm.desktop"
+user = "$name"
 
 [default_session]
 command = "tuigreet --remember --cmd 'uwsm start hyprland-uwsm.desktop'"
@@ -242,14 +247,87 @@ EOF
     # libvirt: start the default NAT network with the daemon (what
     # `virsh net-autostart default` does, without a running daemon).
     ln -sf ../default.xml /etc/libvirt/qemu/networks/autostart/default.xml 2>>"$logfile" || return 1
-    systemctl enable docker.socket libvirtd.service bluetooth.service >>"$logfile" 2>&1 &&
+    # firewall: Arch's default ruleset, minus ssh and the forward chain (its
+    # drop would beat docker's and libvirt's NAT rules), plus DHCPv6, DHCP/DNS
+    # for local VMs and Steam. Docker's published ports bypass this input chain.
+    cat 2>>"$logfile" >/etc/nftables.conf <<'EOF' || return 1
+#!/usr/bin/nft -f
+# Written by aarbs. Drops incoming connections except the ones below.
+
+destroy table inet filter
+table inet filter {
+  chain input {
+    type filter hook input priority filter
+    policy drop
+
+    ct state invalid drop comment "early drop of invalid connections"
+    ct state {established, related} accept comment "allow tracked connections"
+    iif lo accept comment "allow from loopback"
+    meta l4proto { icmp, icmpv6 } accept comment "allow icmp"
+    ip6 saddr fe80::/10 udp dport 546 accept comment "allow DHCPv6 replies"
+    iifname "virbr*" meta l4proto { tcp, udp } th dport { 53, 67 } accept comment "allow DNS/DHCP for libvirt VMs"
+    tcp dport { 27036, 27037 } accept comment "allow Steam Remote Play"
+    udp dport { 10400, 10401, 27031-27036 } accept comment "allow Steam Remote Play"
+    meta l4proto { tcp, udp } th dport 27015 accept comment "allow Steam dedicated server"
+    pkttype host limit rate 5/second counter reject with icmpx type admin-prohibited
+    counter
+  }
+}
+EOF
+    systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service >>"$logfile" 2>&1 &&
         usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
+}
+
+setupstorage() {
+    # Sets up swap in compressed RAM (zram, no swap partition), snapper
+    # snapshots of / before and after every pacman transaction (snap-pac)
+    # and the Limine boot menu with those snapshots.
+    # Needs the guide's btrfs layout, with @snapshots mounted at /.snapshots.
+    cat 2>>"$logfile" >/etc/systemd/zram-generator.conf <<'EOF' || return 1
+[zram0]
+zram-size = min(ram / 2, 16384)
+compression-algorithm = zstd
+EOF
+    # Swap tuning for zram, from the Arch wiki.
+    cat 2>>"$logfile" >/etc/sysctl.d/99-vm-zram-parameters.conf <<'EOF' || return 1
+vm.swappiness = 180
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
+vm.page-cluster = 0
+EOF
+    # create-config makes its own nested .snapshots subvolume; swap it for the
+    # @snapshots mount, so restoring @ doesn't take the snapshots with it.
+    if [ ! -f /etc/snapper/configs/root ]; then
+        { ! mountpoint -q /.snapshots || umount /.snapshots; } &&
+            rm -df /.snapshots &&
+            snapper --no-dbus -c root create-config / &&
+            btrfs subvolume delete /.snapshots &&
+            mkdir /.snapshots
+    fi >>"$logfile" 2>&1 || return 1
+    { mountpoint -q /.snapshots || mount /.snapshots; } >>"$logfile" 2>&1 || return 1
+    # Keep the last 10 pacman snapshots and no hourly ones; wheel can list them.
+    chown :wheel /.snapshots 2>>"$logfile" && chmod 750 /.snapshots 2>>"$logfile" || return 1
+    snapper --no-dbus -c root set-config TIMELINE_CREATE=no NUMBER_LIMIT=10 \
+        NUMBER_LIMIT_IMPORTANT=5 ALLOW_GROUPS=wheel SYNC_ACL=yes >>"$logfile" 2>&1 || return 1
+    # Limine: limine-entry-tool (limine-mkinitcpio-hook) manages the kernel
+    # entries from now on, with an overlay hook so read-only snapshots boot,
+    # and limine-snapper-sync puts the snapshots in the boot menu. The guide's
+    # bootstrap entry goes only once the managed ones exist.
+    printf 'HOOKS+=(sd-btrfs-overlayfs)\n' 2>>"$logfile" >/etc/mkinitcpio.conf.d/limine.conf || return 1
+    printf 'ESP_PATH="/boot"\nENABLE_LIMINE_FALLBACK=yes\nFIND_BOOTLOADERS=no\n' 2>>"$logfile" >/etc/default/limine || return 1
+    limine-update >>"$logfile" 2>&1 || return 1
+    if grep -qx '/Arch Linux (install)' /boot/limine.conf; then
+        limine-entry-tool --remove-entry "Arch Linux (install)" >>"$logfile" 2>&1 &&
+            rm -f /boot/vmlinuz-linux /boot/initramfs-linux.img /boot/initramfs-linux-fallback.img
+    fi || return 1
+    # Clean up old snapshots daily, check the filesystem monthly.
+    systemctl enable snapper-cleanup.timer btrfs-scrub@-.timer limine-snapper-sync.service >>"$logfile" 2>&1
 }
 
 finalize() {
     # Tells the user how to do the next steps.
     whiptail --title "All done!" \
-        --msgbox "Installation complete! All programs and dotfiles should be in place.\\n\\nReboot, then log in as $name at the login screen to start Hyprland.\\n\\n-Abs" 11 80
+        --msgbox "Installation complete! All programs and dotfiles should be in place.\\n\\nReboot: after unlocking the disk, $name is logged into Hyprland automatically.\\n\\n-Abs" 11 80
 }
 
 ### THE ACTUAL SCRIPT ###
@@ -325,6 +403,8 @@ installdotfiles || error "Failed to install dotfiles. See $logfile"
 setupgreetd || error "Failed to set up the login manager. See $logfile"
 
 setupservices || error "Failed to enable services. See $logfile"
+
+setupstorage || error "Failed to set up zram, snapshots and the boot menu. See $logfile"
 
 # Most important command! Get rid of the beep!
 rmmod pcspkr 2>/dev/null
