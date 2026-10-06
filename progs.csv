@@ -87,6 +87,7 @@ A,gh-dash,"is a TUI dashboard for GitHub PRs and issues."
 ,dnsmasq,"provides DHCP/DNS for libvirt's NAT network."
 ,iptables,"gives libvirt's NAT network its firewall rules (nft backend)."
 ,swtpm,"provides a virtual TPM for VMs."
+,dmidecode,"lets libvirt read the host's hardware info (SMBIOS)."
 ,virt-manager,"is the GUI for libvirt."
 ,wireshark-qt,"is a network protocol analyzer."
 # --- File management ---
