@@ -383,9 +383,9 @@ installsudoers aarbs-temp "%wheel ALL=(ALL) NOPASSWD: ALL
 Defaults:%wheel,root runcwd=*" ||
     error "Failed to install temporary sudoers rule."
 
-# Use all cores for compilation.
+# Use all cores for compilation, and don't build -debug packages.
 mkdir -p /etc/makepkg.conf.d
-printf 'MAKEFLAGS="-j%s"\n' "$(nproc)" >/etc/makepkg.conf.d/aarbs.conf
+printf 'MAKEFLAGS="-j%s"\nOPTIONS=("${OPTIONS[@]/#debug/!debug}")\n' "$(nproc)" >/etc/makepkg.conf.d/aarbs.conf
 
 manualinstall yay-bin || error "Failed to install AUR helper. See $logfile"
 

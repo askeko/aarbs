@@ -129,6 +129,7 @@ A,jpeginfo,"checks JPEG files."
 ,wireplumber,"is the audio system."
 ,pipewire-pulse,"gives pipewire compatibility with PulseAudio programs."
 ,pipewire-alsa,"routes ALSA programs through pipewire."
+,rtkit,"lets pipewire run with realtime priority."
 A,pwvucontrol,"is the volume mixer."
 # --- Hardware & system ---
 ,brightnessctl,"is for setting screen brightness."
