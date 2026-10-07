@@ -274,7 +274,7 @@ table inet filter {
   }
 }
 EOF
-    systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service >>"$logfile" 2>&1 &&
+    systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service paccache.timer >>"$logfile" 2>&1 &&
         usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
 }
 
