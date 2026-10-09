@@ -228,6 +228,27 @@ EOF
     systemctl enable greetd.service >>"$logfile" 2>&1
 }
 
+setupyubikey() {
+    # Every local login (TTYs, tuigreet and hyprlock, which all include
+    # system-local-login) takes the password, then a touch on a YubiKey
+    # (abslab's order): a wrong password fails without asking for a touch, and
+    # a key unplugged at lock time can be plugged back in before typing.
+    # nouserok lets the password alone log in until the keys are registered
+    # with pamu2fcfg (see the guide). The touch prompt doesn't show in
+    # hyprlock; the key blinks. Autologin at boot skips this; the disk unlock
+    # guards it.
+    grep -q pam_u2f /etc/pam.d/system-local-login ||
+        sed -i '/^auth.*include.*system-login/a auth      required  pam_u2f.so cue nouserok' \
+            /etc/pam.d/system-local-login 2>>"$logfile" || return 1
+    grep -q pam_u2f /etc/pam.d/system-local-login || return 1
+    # Pulling out a YubiKey locks every session (hypridle's lock_cmd runs
+    # hyprlock). Matches only the usb_device node: each interface would fire
+    # its own remove event and start several hyprlocks.
+    cat 2>>"$logfile" >/etc/udev/rules.d/90-yubikey-lock.rules <<'EOF'
+ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{PRODUCT}=="1050/*", RUN+="/usr/bin/loginctl lock-sessions"
+EOF
+}
+
 setupservices() {
     # Enables system services for the installed programs and adds $name to
     # the groups that use them. Everything takes effect on reboot.
@@ -276,6 +297,41 @@ table inet filter {
 EOF
     systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service paccache.timer >>"$logfile" 2>&1 &&
         usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
+}
+
+setupnix() {
+    # Nix next to pacman, for `nix shell nixpkgs#<program>` and project dev
+    # shells (direnv `use flake`); /nix is its own btrfs subvolume (see the
+    # guide), so snapshots don't hold old store paths. The daemon socket is
+    # open to all users. A weekly timer removes store paths nothing uses any
+    # more, as abslab did.
+    grep -q '^experimental-features' /etc/nix/nix.conf ||
+        printf 'experimental-features = nix-command flakes\nauto-optimise-store = true\n' \
+            >>/etc/nix/nix.conf 2>>"$logfile" || return 1
+    cat 2>>"$logfile" >/etc/systemd/system/nix-gc.service <<'EOF' || return 1
+[Unit]
+Description=Nix garbage collection
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nix-collect-garbage --delete-older-than 7d
+EOF
+    cat 2>>"$logfile" >/etc/systemd/system/nix-gc.timer <<'EOF' || return 1
+[Unit]
+Description=Weekly Nix garbage collection
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl enable nix-gc.timer >>"$logfile" 2>&1 &&
+        systemctl enable --now nix-daemon.socket >>"$logfile" 2>&1 || return 1
+    # The package doesn't create /nix/store, and `nix shell` fails until it
+    # exists; the daemon creates it on the first connection.
+    nix store info --store daemon >>"$logfile" 2>&1
 }
 
 setupstorage() {
@@ -402,7 +458,11 @@ installdotfiles || error "Failed to install dotfiles. See $logfile"
 
 setupgreetd || error "Failed to set up the login manager. See $logfile"
 
+setupyubikey || error "Failed to set up YubiKey login. See $logfile"
+
 setupservices || error "Failed to enable services. See $logfile"
+
+setupnix || error "Failed to set up Nix. See $logfile"
 
 setupstorage || error "Failed to set up zram, snapshots and the boot menu. See $logfile"
 
