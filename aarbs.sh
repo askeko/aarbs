@@ -304,7 +304,7 @@ EOF
         ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>>"$logfile" || return 1
     systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service paccache.timer \
         scx_loader.service ananicy-cpp.service power-profiles-daemon.service \
-        cachyos-rate-mirrors.timer >>"$logfile" 2>&1 &&
+        cachyos-rate-mirrors.timer linux-modules-cleanup.service >>"$logfile" 2>&1 &&
         usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
 }
 
