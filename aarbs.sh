@@ -34,7 +34,7 @@ welcomemsg() {
 }
 
 validname() {
-    # Succeeds if $1 is a valid, non-root username of at most 32 characters.
+    # Succeeds if $1 is a valid username of at most 32 characters.
     [ "$1" != "root" ] && [ "${#1}" -le 32 ] || return 1
     case "$1" in
         "" | [!a-z]* | *[!a-z0-9_-]*) return 1 ;;
@@ -97,24 +97,45 @@ upgradesystem() {
 }
 
 installgpudrivers() {
-    # Installs 64- and 32-bit Vulkan drivers for the GPUs found, so packages
-    # that need a vulkan-driver (Steam) don't get a provider picked for them.
-    gpus=$(lspci -mm | grep -E '"(VGA compatible|3D|Display) controller"')
-    pkgs=""
-    case "$gpus" in *NVIDIA*) pkgs="$pkgs nvidia-open nvidia-utils lib32-nvidia-utils" ;; esac
-    case "$gpus" in *"Advanced Micro Devices"*) pkgs="$pkgs vulkan-radeon lib32-vulkan-radeon" ;; esac
-    case "$gpus" in *Intel*) pkgs="$pkgs vulkan-intel lib32-vulkan-intel" ;; esac
-    # No known GPU (e.g. a VM): use the software renderer.
-    [ -n "$pkgs" ] || pkgs="vulkan-swrast lib32-vulkan-swrast"
-    whiptail --infobox "Installing GPU drivers:$pkgs" 8 70
-    # shellcheck disable=SC2086 # The package list is meant to be split.
-    pacman --noconfirm --needed -S $pkgs >>"$logfile" 2>&1
+    # CachyOS' hardware detection (chwd) installs the drivers.
+    whiptail --infobox "Detecting hardware and installing drivers..." 7 60
+    pacman --noconfirm --needed -S linux-cachyos chwd >>"$logfile" 2>&1 &&
+        chwd --autoconfigure >>"$logfile" 2>&1 || return 1
+    [ -z "$(lspci -d '10de:*:030x')" ] ||
+        pacman --noconfirm --needed -S nvidia-open >>"$logfile" 2>&1
+}
+
+setupcachyos() {
+    # Puts CachyOS' repositories above Arch's.
+    whiptail --infobox "Adding the CachyOS repositories..." 7 60
+    if ! grep -q '^\[cachyos\]' /etc/pacman.conf; then
+        dir=$(mktemp -d) &&
+            curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz | tar -xJf - -C "$dir" &&
+            (cd "$dir/cachyos-repo" && yes | ./cachyos-repo.sh) &&
+            rm -rf "$dir"
+    fi >>"$logfile" 2>&1 || return 1
+    grep -q '^\[cachyos\]' /etc/pacman.conf || return 1
+    # Rank mirrors
+    pacman --noconfirm --needed -S cachyos-rate-mirrors >>"$logfile" 2>&1 || return 1
+    cachyos-rate-mirrors >>"$logfile" 2>&1 || true
+    whiptail --infobox "Swapping in CachyOS' optimized packages..." 7 60
+    new=$(mktemp) && old=$(mktemp) || return 1
+    # shellcheck disable=SC2046 # The package list is meant to be split.
+    pacman -S --print --print-format '%n %v %a' $(pacman -Qqn) 2>>"$logfile" | LC_ALL=C sort >"$new"
+    pacman -Qi | awk '/^Name/ {n = $3} /^Version/ {v = $3} /^Architecture/ {print n, v, $3}' |
+        LC_ALL=C sort >"$old"
+    LC_ALL=C join "$new" "$old" | while read -r n nv na ov oa; do
+        [ "$na" != "$oa" ] && [ "$(vercmp "$nv" "$ov")" -ge 0 ] && echo "$n"
+    done >"$new.todo"
+    [ ! -s "$new.todo" ] || pacman --noconfirm -S - <"$new.todo" >>"$logfile" 2>&1 || return 1
+    rm -f "$new" "$old" "$new.todo"
+    # scx_loader runs the scx_lavd scheduler.
+    mkdir -p /etc/scx_loader 2>>"$logfile" &&
+        printf 'default_sched = "scx_lavd"\ndefault_mode = "Auto"\n' >/etc/scx_loader/config.toml
 }
 
 manualinstall() {
-    # Builds and installs AUR package $1 without an AUR helper.
-    # Needs $repodir and the temporary passwordless sudo rule.
-    # Only used to install the AUR helper.
+    # Install the AUR helper.
     pacman -Qq "$1" >/dev/null 2>&1 && return 0
     whiptail --infobox "Installing \"$1\" manually." 7 50
     dir="$repodir/$1"
@@ -229,14 +250,10 @@ EOF
 }
 
 setupyubikey() {
-    # Every local login (TTYs, tuigreet and hyprlock, which all include
-    # system-local-login) takes the password, then a touch on a YubiKey
-    # (abslab's order): a wrong password fails without asking for a touch, and
-    # a key unplugged at lock time can be plugged back in before typing.
+    # Every local login takes the password, then a touch on a YubiKey.
+    # A wrong password fails without asking for a touch.
     # nouserok lets the password alone log in until the keys are registered
-    # with pamu2fcfg (see the guide). The touch prompt doesn't show in
-    # hyprlock; the key blinks. Autologin at boot skips this; the disk unlock
-    # guards it.
+    # with pamu2fcfg (see the guide).
     grep -q pam_u2f /etc/pam.d/system-local-login ||
         sed -i '/^auth.*include.*system-login/a auth      required  pam_u2f.so cue nouserok' \
             /etc/pam.d/system-local-login 2>>"$logfile" || return 1
@@ -295,7 +312,16 @@ table inet filter {
   }
 }
 EOF
-    systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service paccache.timer >>"$logfile" 2>&1 &&
+    # DNS goes through systemd-resolved, as on CachyOS (cachyos-settings
+    # enables it and points NetworkManager at it): resolv.conf becomes its
+    # local stub, and wg-quick's resolvconf (systemd-resolvconf) hands a VPN's
+    # DNS to it. Started now, so DNS keeps working for the rest of the install.
+    systemctl enable --now systemd-resolved.service >>"$logfile" 2>&1 &&
+        systemctl reload NetworkManager.service >>"$logfile" 2>&1 &&
+        ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>>"$logfile" || return 1
+    systemctl enable docker.socket libvirtd.service bluetooth.service nftables.service paccache.timer \
+        scx_loader.service ananicy-cpp.service power-profiles-daemon.service \
+        cachyos-rate-mirrors.timer >>"$logfile" 2>&1 &&
         usermod -a -G docker,libvirt,wireshark "$name" >>"$logfile" 2>&1
 }
 
@@ -304,7 +330,7 @@ setupnix() {
     # shells (direnv `use flake`); /nix is its own btrfs subvolume (see the
     # guide), so snapshots don't hold old store paths. The daemon socket is
     # open to all users. A weekly timer removes store paths nothing uses any
-    # more, as abslab did.
+    # more.
     grep -q '^experimental-features' /etc/nix/nix.conf ||
         printf 'experimental-features = nix-command flakes\nauto-optimise-store = true\n' \
             >>/etc/nix/nix.conf 2>>"$logfile" || return 1
@@ -330,7 +356,7 @@ EOF
     systemctl enable nix-gc.timer >>"$logfile" 2>&1 &&
         systemctl enable --now nix-daemon.socket >>"$logfile" 2>&1 || return 1
     # The package doesn't create /nix/store, and `nix shell` fails until it
-    # exists; the daemon creates it on the first connection.
+    # exists.
     nix store info --store daemon >>"$logfile" 2>&1
 }
 
@@ -344,12 +370,11 @@ setupstorage() {
 zram-size = min(ram / 2, 16384)
 compression-algorithm = zstd
 EOF
-    # Swap tuning for zram, from the Arch wiki.
+    # Swap tuning for zram, from the Arch wiki. cachyos-settings sets the rest
+    # (swappiness 150 once zram starts, page-cluster 0).
     cat 2>>"$logfile" >/etc/sysctl.d/99-vm-zram-parameters.conf <<'EOF' || return 1
-vm.swappiness = 180
 vm.watermark_boost_factor = 0
 vm.watermark_scale_factor = 125
-vm.page-cluster = 0
 EOF
     # create-config makes its own nested .snapshots subvolume; swap it for the
     # @snapshots mount, so restoring @ doesn't take the snapshots with it.
@@ -370,7 +395,9 @@ EOF
     # and limine-snapper-sync puts the snapshots in the boot menu. The guide's
     # bootstrap entry goes only once the managed ones exist.
     printf 'HOOKS+=(sd-btrfs-overlayfs)\n' 2>>"$logfile" >/etc/mkinitcpio.conf.d/limine.conf || return 1
-    printf 'ESP_PATH="/boot"\nENABLE_LIMINE_FALLBACK=yes\nFIND_BOOTLOADERS=no\n' 2>>"$logfile" >/etc/default/limine || return 1
+    # linux-cachyos boots by default; the stock linux stays as the next entry.
+    printf 'ESP_PATH="/boot"\nENABLE_LIMINE_FALLBACK=yes\nFIND_BOOTLOADERS=no\nBOOT_ORDER="linux-cachyos, *, *fallback, Snapshots"\n' \
+        2>>"$logfile" >/etc/default/limine || return 1
     limine-update >>"$logfile" 2>&1 || return 1
     if grep -qx '/Arch Linux (install)' /boot/limine.conf; then
         limine-entry-tool --remove-entry "Arch Linux (install)" >>"$logfile" 2>&1 &&
@@ -427,6 +454,10 @@ whiptail --title "AARBS Installation" \
 pacman --noconfirm --needed -S curl ca-certificates base-devel git zsh pciutils >>"$logfile" 2>&1 ||
     error "Failed to install base packages. See $logfile"
 
+# Before anything else is installed, so it all comes from CachyOS' builds, but
+# after base-devel: CachyOS' script detects Zen 4/5 (znver4 repos) with gcc.
+setupcachyos || error "Failed to set up the CachyOS repositories. See $logfile"
+
 installgpudrivers || error "Failed to install GPU drivers. See $logfile"
 
 adduserandpass || error "Error adding username and/or password."
@@ -441,6 +472,7 @@ Defaults:%wheel,root runcwd=*" ||
 
 # Use all cores for compilation, and don't build -debug packages.
 mkdir -p /etc/makepkg.conf.d
+# shellcheck disable=SC2016 # makepkg expands ${OPTIONS[@]} when it reads the file.
 printf 'MAKEFLAGS="-j%s"\nOPTIONS=("${OPTIONS[@]/#debug/!debug}")\n' "$(nproc)" >/etc/makepkg.conf.d/aarbs.conf
 
 manualinstall yay-bin || error "Failed to install AUR helper. See $logfile"
