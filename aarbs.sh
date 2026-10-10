@@ -15,7 +15,7 @@ progsurl="https://raw.githubusercontent.com/askeko/aarbs/main/progs.csv"
 progsfile="$(dirname "$0")/progs.csv"
 [ -f "$0" ] || progsfile=""
 dotfilesrepo="https://github.com/askeko/absrice.git"
-aurhelper="yay"
+aurhelper="paru"
 logfile="/var/log/aarbs.log"
 
 ### FUNCTIONS ###
@@ -82,9 +82,6 @@ adduserandpass() {
     else
         useradd -m -G wheel -s /bin/zsh "$name" >>"$logfile" 2>&1 || return 1
     fi
-    repodir="/home/$name/.local/src"
-    mkdir -p "$repodir"
-    chown -R "$name": "/home/$name/.local"
     printf '%s:%s\n' "$name" "$pass1" | chpasswd || return 1
     unset pass1 pass2
 }
@@ -134,23 +131,9 @@ setupcachyos() {
         printf 'default_sched = "scx_lavd"\ndefault_mode = "Auto"\n' >/etc/scx_loader/config.toml
 }
 
-manualinstall() {
-    # Install the AUR helper.
-    pacman -Qq "$1" >/dev/null 2>&1 && return 0
-    whiptail --infobox "Installing \"$1\" manually." 7 50
-    dir="$repodir/$1"
-    if [ -d "$dir/.git" ]; then
-        sudo -u "$name" git -C "$dir" pull --ff-only -q
-    else
-        sudo -u "$name" git clone --depth 1 --single-branch --no-tags -q \
-            "https://aur.archlinux.org/$1.git" "$dir"
-    fi || return 1
-    sudo -u "$name" -D "$dir" makepkg --noconfirm -si >>"$logfile" 2>&1
-}
-
 installationloop() {
     # Installs everything in progs.csv: repo packages in one pacman call and AUR
-    # packages in one yay call. Stops and names any package that doesn't exist.
+    # packages in one paru call. Stops and names any package that doesn't exist.
     progs=$(mktemp) || error "Failed to create temp file."
     if [ -f "$progsfile" ]; then
         cp "$progsfile" "$progs"
@@ -436,9 +419,6 @@ preinstallmsg || error "User exited."
 
 ### The rest of the script requires no user input.
 
-# Make sure the clock is synced before downloading and verifying packages.
-timedatectl set-ntp true >>"$logfile" 2>&1
-
 # Make pacman colorful, concurrent downloads and Pacman eye-candy. Enable
 # multilib for 32-bit libraries (Steam and its GPU drivers).
 grep -q "ILoveCandy" /etc/pacman.conf || sed -i "/#VerbosePkgLists/a ILoveCandy" /etc/pacman.conf
@@ -475,7 +455,8 @@ mkdir -p /etc/makepkg.conf.d
 # shellcheck disable=SC2016 # makepkg expands ${OPTIONS[@]} when it reads the file.
 printf 'MAKEFLAGS="-j%s"\nOPTIONS=("${OPTIONS[@]/#debug/!debug}")\n' "$(nproc)" >/etc/makepkg.conf.d/aarbs.conf
 
-manualinstall yay-bin || error "Failed to install AUR helper. See $logfile"
+pacman --noconfirm --needed -S paru >>"$logfile" 2>&1 ||
+    error "Failed to install the AUR helper. See $logfile"
 
 # The command that does all the installing. Reads the progs.csv file and
 # installs each needed program the way required. Be sure to run this only after
