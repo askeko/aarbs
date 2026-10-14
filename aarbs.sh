@@ -241,9 +241,9 @@ setupyubikey() {
         sed -i '/^auth.*include.*system-login/a auth      required  pam_u2f.so cue nouserok' \
             /etc/pam.d/system-local-login 2>>"$logfile" || return 1
     grep -q pam_u2f /etc/pam.d/system-local-login || return 1
-    # Pulling out a YubiKey locks every session (hypridle's lock_cmd runs
-    # hyprlock). Matches only the usb_device node: each interface would fire
-    # its own remove event and start several hyprlocks.
+    # Pulling out a YubiKey locks every session (Noctalia locks on logind's
+    # lock request). Matches only the usb_device node: each interface would
+    # fire its own remove event and send several lock requests.
     cat 2>>"$logfile" >/etc/udev/rules.d/90-yubikey-lock.rules <<'EOF'
 ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{PRODUCT}=="1050/*", RUN+="/usr/bin/loginctl lock-sessions"
 EOF
